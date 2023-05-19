@@ -1,0 +1,137 @@
+#!/bin/bash
+set -eu
+PATH="$PWD/fonttools/bin:/bin:/usr/bin"
+CMD="$0"
+function fail () {
+  cat <<<"${CMD}: $*" 2>&1
+  exit 1
+}
+function usage () {
+  cat <<<"Usage: ${CMD} <config>" 2>&1
+  exit 1
+}
+if [ $# -ne 1 ]; then
+  usage
+  exit 1
+fi
+
+CONF="$1"
+if [ ! -f "${CONF}" ]; then
+  usage
+  exit 1
+fi
+
+. "${CONF}"
+if [[ ! ( -v FAMILY && -v FSNAME && -v FILES && -v RANGES && -v LICENSE ) ]]; then
+  fail "Bad config file"
+fi
+
+shopt -s extglob
+
+function css_import_tmpl () {
+  local file="$1"
+  cat <<<"@import url('${file}');"
+}
+
+function css_w_tmpl () {
+  local file="$1"
+  local weight="$2"
+  local range="$3"
+
+cat <<TMPL
+@font-face {
+  font-family: '${FAMILY}';
+  font-weight: ${weight};
+  font-display: swap;
+  src: url(${file}) format('woff2');
+  unicode-range: ${range};
+}
+TMPL
+}
+
+function css_vt_tmpl () {
+  local file="$1"
+  local range="$2"
+
+cat <<TMPL
+@font-face {
+  font-family: '${FAMILY}';
+  font-display: swap;
+  src: url(${file}) format('woff2');
+  unicode-range: ${range};
+}
+TMPL
+}
+
+
+src_dir="src/${FSNAME}"
+dst_dir="dst/${FSNAME}"
+mkdir -p -- "${dst_dir}"
+
+if [ ! -z "${LICENSE}" ]; then
+  lcns_file="${src_dir}/${LICENSE}"
+  [ -f "${lcns_file}" ] || fail "Not found ${lcns_file}"
+
+  cp "${lcns_file}" "${dst_dir}/"
+fi
+
+css_file="${dst_dir}.css"
+if [ -f "${css_file}" ]; then
+  rm -- "${css_file}"
+fi
+
+declare -A do_w_css=()
+for fp in "${FILES[@]}"; do
+  fcnf=(${fp})
+  f="${fcnf[0]}"
+  w="${fcnf[1]:-""}"
+  dstbase="${f%%.+([a-zA-Z0-9])}"
+
+  src="${src_dir}/${f}"
+  [ -f "${src}" ] || fail "Not found font(${src} ${fp})"
+
+  for r in "${RANGES[@]}"; do
+    if [ -z "${w}" ]; then
+      dst="${dst_dir}/${dstbase}-${r}.woff2"
+    else
+      dst="${dst_dir}/${dstbase}-${r}-${w}.woff2"
+    fi
+
+    [ -f "range/${r}" ] || fail "Not found range file: ${r}"
+
+    range="$(sed 's/#.*$//; /^ *$/d;' range/"${r}" | tr '\n' ' ' | sed 's/ /, /g; s/, *$//;')"
+    dstdir=$(dirname "${dst}")
+    rfile="range/${r}"
+
+    if [ -f "${dst}" ]; then
+      echo "Warning: found ${dst}"
+    else
+      echo "${src} -> ${dst} ${r}"
+      pyftsubset "${src}"  \
+      --drop-tables+=FFTM \
+      --layout-features='*' \
+      --output-file="${dst}" \
+      --flavor=woff2 \
+      --unicodes-file="${rfile}"
+    fi
+
+    if [ -z "${w}" ]; then
+      css_vt_tmpl "${dst#dst/}" "${range}" >> "${css_file}"
+    else
+      css_w_file="${dst_dir}-${w}.css"
+
+      set +u
+      if [ -z "${do_w_css[${w}]}" ]; then
+        css_import_tmpl "${css_w_file#dst/}" >> "${css_file}"
+        do_w_css["${w}"]="1"
+        if [ -f "${css_w_file}" ]; then
+          rm -- "${css_w_file}"
+        fi
+      fi
+      set -u
+
+      css_w_tmpl "${dst#dst/}" "${w}" "${range}" >> "${css_w_file}"
+    fi
+  done
+done
+rmdir -p --ignore-fail-on-non-empty -- "${dst_dir}"
